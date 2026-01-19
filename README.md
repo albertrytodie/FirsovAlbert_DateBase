@@ -391,6 +391,7 @@ ORDER BY i.quantity DESC
 LIMIT 10;
 ```
 Результат проверки
+
 <img width="553" height="247" alt="image" src="https://github.com/user-attachments/assets/bb347a30-0816-4f07-b060-5d17de3c3f54" />
 
 
