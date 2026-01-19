@@ -308,8 +308,8 @@ SELECT * FROM firsov2272.get_warehouse_stock_func(2, 0, 5000);
 ```
 <img width="919" height="105" alt="image" src="https://github.com/user-attachments/assets/08467041-3942-4eb0-85f7-3afcf5d2cf51" />
 
-### Лабораторная работа №4
-## 1. Создание генератора данных
+## Лабораторная работа №4
+### 1. Создание генератора данных
 ```
 SET search_path TO firsov2272;
 
@@ -394,7 +394,7 @@ LIMIT 10;
 <img width="553" height="247" alt="image" src="https://github.com/user-attachments/assets/bb347a30-0816-4f07-b060-5d17de3c3f54" />
 
 
-## 2. Анализ планов выполнения запросов 
+### 2. Анализ планов выполнения запросов 
 ```
 EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
 SELECT 
@@ -492,7 +492,7 @@ LIMIT 20;
 - Полное сканирование таблиц вместо использования индексов
 - Hash Join может быть заменен на более эффективные соединения
 
-## 3. Оптимизация
+### 3. Оптимизация
 ```
 -- 1. Индекс для фильтрации по quantity
 CREATE INDEX idx_inventory_quantity ON inventory(quantity) WHERE quantity > 10;
@@ -584,3 +584,356 @@ CREATE INDEX idx_warehouses_id ON warehouses(warehouse_id);
 - Время выполнения уменьшилось на 28%
 - Для маленьких таблиц PostgreSQL часто выбирает Seq Scan, даже если есть индексы
 - Planning Time увеличился — планировщику нужно больше времени для выбора из большего количества вариантов
+## Лабораторная работа №5
+
+### 1. Задание
+Освоение механизмов триггеров в PostgreSQL для реализации:
+- Каскадного удаления записей в подчиненных таблицах
+- Аудита изменений (INSERT, UPDATE, DELETE) через таблицу-журнал
+
+### 2. Созданные объекты БД
+
+#### 1. Таблица-журнал аудита
+```
+CREATE TABLE firsov2272.audit_log (
+    audit_id SERIAL PRIMARY KEY,
+    operation VARCHAR(10) NOT NULL,
+    table_name VARCHAR(50) NOT NULL,
+    record_id INTEGER,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    changed_by VARCHAR(100) DEFAULT CURRENT_USER
+);
+```
+
+#### 2. Функции триггеров
+
+**Для таблицы products:**
+```
+CREATE OR REPLACE FUNCTION firsov2272.handle_products_operations()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Каскадное удаление при DELETE
+    IF TG_OP = 'DELETE' THEN
+        DELETE FROM firsov2272.inventory WHERE product_id = OLD.product_id;
+        DELETE FROM firsov2272.admissions WHERE product_id = OLD.product_id;
+        DELETE FROM firsov2272.requests WHERE product_id = OLD.product_id;
+    END IF;
+    
+    -- Запись в аудит
+    IF TG_OP = 'DELETE' THEN
+        INSERT INTO firsov2272.audit_log (operation, table_name, record_id)
+        VALUES ('DELETE', 'products', OLD.product_id);
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO firsov2272.audit_log (operation, table_name, record_id)
+        VALUES ('UPDATE', 'products', NEW.product_id);
+        RETURN NEW;
+    ELSIF TG_OP = 'INSERT' THEN
+        INSERT INTO firsov2272.audit_log (operation, table_name, record_id)
+        VALUES ('INSERT', 'products', NEW.product_id);
+        RETURN NEW;
+    END IF;
+    
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Для таблицы warehouses:**
+```
+CREATE OR REPLACE FUNCTION firsov2272.handle_warehouses_operations()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Каскадное удаление при DELETE
+    IF TG_OP = 'DELETE' THEN
+        DELETE FROM firsov2272.inventory WHERE warehouse_id = OLD.warehouse_id;
+        DELETE FROM firsov2272.admissions WHERE warehouse_id = OLD.warehouse_id;
+        DELETE FROM firsov2272.requests WHERE warehouse_id = OLD.warehouse_id;
+    END IF;
+    
+    -- Запись в аудит
+    IF TG_OP = 'DELETE' THEN
+        INSERT INTO firsov2272.audit_log (operation, table_name, record_id)
+        VALUES ('DELETE', 'warehouses', OLD.warehouse_id);
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO firsov2272.audit_log (operation, table_name, record_id)
+        VALUES ('UPDATE', 'warehouses', NEW.warehouse_id);
+        RETURN NEW;
+    ELSIF TG_OP = 'INSERT' THEN
+        INSERT INTO firsov2272.audit_log (operation, table_name, record_id)
+        VALUES ('INSERT', 'warehouses', NEW.warehouse_id);
+        RETURN NEW;
+    END IF;
+    
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+#### 3. Триггеры
+```
+-- Для products
+CREATE TRIGGER products_final_trigger
+BEFORE INSERT OR UPDATE OR DELETE ON firsov2272.products
+FOR EACH ROW
+EXECUTE FUNCTION firsov2272.handle_products_operations();
+
+-- Для warehouses
+CREATE TRIGGER warehouses_final_trigger
+BEFORE INSERT OR UPDATE OR DELETE ON firsov2272.warehouses
+FOR EACH ROW
+EXECUTE FUNCTION firsov2272.handle_warehouses_operations();
+```
+
+### 3. Проверки работоспособности
+
+####  Проверка 1: Существование объектов
+```
+-- 1. Проверка таблицы audit_log
+SELECT 
+    column_name as "Имя колонки", 
+    data_type as "Тип данных",
+    is_nullable as "Может быть NULL"
+FROM information_schema.columns 
+WHERE table_schema = 'firsov2272' 
+  AND table_name = 'audit_log'
+ORDER BY ordinal_position;
+
+-- 2. Проверка созданных триггеров
+SELECT 
+    tgname as trigger_name,
+    relname as table_name,
+    CASE WHEN tgtype & 1 > 0 THEN 'BEFORE' ELSE 'AFTER' END as trigger_type,
+    CASE 
+        WHEN tgtype & 4 > 0 THEN 'INSERT'
+        WHEN tgtype & 8 > 0 THEN 'DELETE' 
+        WHEN tgtype & 16 > 0 THEN 'UPDATE'
+        WHEN tgtype & 28 > 0 THEN 'ALL'
+    END as trigger_events
+FROM pg_trigger t
+JOIN pg_class c ON t.tgrelid = c.oid
+WHERE c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'firsov2272')
+  AND NOT t.tgisinternal
+ORDER BY relname, tgname;
+
+-- 3. Проверка функций триггеров
+SELECT 
+    proname as function_name,
+    LEFT(prosrc, 200) as source_code_preview
+FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = 'firsov2272'
+  AND proname LIKE '%handle%'
+ORDER BY proname;
+```
+
+**Результат проверки структуры таблицы audit_log:**
+
+<img width="376" height="159" alt="image" src="https://github.com/user-attachments/assets/274f1ac9-7e0e-4aa4-9e58-3dbbf6d42690" />
+
+
+**Результат проверки триггеров:**
+
+<img width="405" height="92" alt="image" src="https://github.com/user-attachments/assets/b63ca6dd-2f20-4178-8595-35265e6335a7" />
+
+
+**Результат проверки функций:**
+
+<img width="1032" height="108" alt="image" src="https://github.com/user-attachments/assets/79d616d6-93cd-4b53-b459-74ca37cea07c" />
+
+
+####  Проверка 2: Тестирование аудита операций
+
+```
+-- 1. Очистка старых записей
+TRUNCATE TABLE firsov2272.audit_log RESTART IDENTITY;
+
+-- 2. Вставка нового товара
+INSERT INTO firsov2272.products (product_name, measure_unit, unit_cost)
+VALUES ('Тестовый товар для аудита', 'шт', 150.00);
+
+-- 3. Проверка записи INSERT
+SELECT * FROM firsov2272.audit_log 
+WHERE table_name = 'products' 
+ORDER BY changed_at DESC;
+
+-- 4. Обновление товара
+UPDATE firsov2272.products 
+SET unit_cost = 200.00 
+WHERE product_name = 'Тестовый товар для аудита';
+
+-- 5. Проверка записи UPDATE
+SELECT * FROM firsov2272.audit_log 
+WHERE table_name = 'products' 
+ORDER BY changed_at DESC;
+
+-- 6. Удаление товара
+DELETE FROM firsov2272.products 
+WHERE product_name = 'Тестовый товар для аудита';
+
+-- 7. Проверка записи DELETE и итоговый результат
+SELECT * FROM firsov2272.audit_log 
+ORDER BY audit_id;
+```
+
+**Результат проверки аудита:**
+
+<img width="697" height="121" alt="image" src="https://github.com/user-attachments/assets/cf593b8f-dd2c-4bd9-9e75-1d22e93eae46" />
+
+
+####  Проверка 3: Каскадное удаление
+
+```
+-- 1. Очистка аудита
+TRUNCATE TABLE firsov2272.audit_log RESTART IDENTITY;
+
+-- 2. Создаем тестовый товар
+INSERT INTO firsov2272.products (product_name, measure_unit, unit_cost)
+VALUES ('Товар для каскада', 'кг', 300.00)
+RETURNING product_id;
+
+-- 3. Проверяем созданный товар
+SELECT * FROM firsov2272.products 
+WHERE product_name = 'Товар для каскада';
+
+-- 4. Создаем связанные записи
+INSERT INTO firsov2272.inventory (warehouse_id, product_id, quantity)
+SELECT 1, product_id, 50 
+FROM firsov2272.products 
+WHERE product_name = 'Товар для каскада';
+
+INSERT INTO firsov2272.admissions (product_id, warehouse_id, quantity)
+SELECT product_id, 1, 100 
+FROM firsov2272.products 
+WHERE product_name = 'Товар для каскада';
+
+-- 5. Проверяем что записи созданы
+SELECT 
+    (SELECT COUNT(*) FROM firsov2272.inventory WHERE product_id = 110) as inventory_count,
+    (SELECT COUNT(*) FROM firsov2272.admissions WHERE product_id = 110) as admissions_count;
+
+-- 6. Удаляем товар (должен сработать каскад)
+DELETE FROM firsov2272.products 
+WHERE product_id = 110;
+
+-- 7. Проверяем что связанные записи удалились
+SELECT 
+    (SELECT COUNT(*) FROM firsov2272.inventory WHERE product_id = 110) as inventory_after,
+    (SELECT COUNT(*) FROM firsov2272.admissions WHERE product_id = 110) as admissions_after;
+
+-- 8. Проверяем аудит
+SELECT * FROM firsov2272.audit_log 
+ORDER BY audit_id;
+```
+
+**Результат проверки каскадного удаления:**
+
+<img width="699" height="86" alt="image" src="https://github.com/user-attachments/assets/2b9704d1-411b-4b16-a229-e17f41e610df" />
+
+
+####  Проверка 4: Тестирование warehouses
+
+```
+-- 1. Очистка аудита
+TRUNCATE TABLE firsov2272.audit_log RESTART IDENTITY;
+
+-- 2. Вставка тестового склада
+INSERT INTO firsov2272.warehouses (manager_name)
+VALUES ('Тестовый склад для аудита');
+
+-- 3. Проверка записи INSERT
+SELECT * FROM firsov2272.audit_log 
+WHERE table_name = 'warehouses' 
+ORDER BY audit_id;
+
+-- 4. Удаление склада
+DELETE FROM firsov2272.warehouses 
+WHERE warehouse_id = 26;
+
+-- 5. Итоговый аудит
+SELECT * FROM firsov2272.audit_log 
+WHERE table_name = 'warehouses'
+ORDER BY audit_id;
+```
+
+**Результат проверки warehouses:**
+
+<img width="693" height="91" alt="image" src="https://github.com/user-attachments/assets/8c7e5b06-730d-4d24-902e-9bcedd883611" />
+
+
+####  Проверка 5: Полная проверка всех объектов
+```
+-- Итоговый отчет о созданных объектах
+WITH triggers_info AS (
+    SELECT 
+        COUNT(*) as triggers_count,
+        STRING_AGG(relname || '.' || tgname, ', ') as triggers_list
+    FROM pg_trigger t
+    JOIN pg_class c ON t.tgrelid = c.oid
+    WHERE c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'firsov2272')
+      AND NOT t.tgisinternal
+),
+functions_info AS (
+    SELECT 
+        COUNT(*) as functions_count,
+        STRING_AGG(proname, ', ') as functions_list
+    FROM pg_proc p
+    JOIN pg_namespace n ON p.pronamespace = n.oid
+    WHERE n.nspname = 'firsov2272'
+      AND (proname LIKE '%handle%' OR proname LIKE '%audit%' OR proname LIKE '%cascade%')
+),
+audit_info AS (
+    SELECT 
+        COUNT(*) as audit_records,
+        STRING_AGG(DISTINCT operation, ', ') as operations_performed
+    FROM firsov2272.audit_log
+)
+SELECT 
+    t.triggers_count,
+    t.triggers_list,
+    f.functions_count,
+    f.functions_list,
+    a.audit_records,
+    a.operations_performed
+FROM triggers_info t, functions_info f, audit_info a;
+```
+
+**Итоговый отчет:**
+
+<img width="1540" height="107" alt="image" src="https://github.com/user-attachments/assets/cdf4782b-7cd9-48ba-8942-ba0f7f169cd4" />
+
+
+###  Результаты тестирования
+Все 5 проверок пройдены успешно:
+1.  Созданы все объекты БД: таблица audit_log, 2 триггера, 2 функции
+2.  Аудит операций работает корректно: INSERT, UPDATE, DELETE фиксируются
+3.  Каскадное удаление работает: при удалении товара удаляются связанные записи
+4.  Триггеры для warehouses работают: аудит операций со складами
+5.  Все объекты созданы и функционируют
+
+### Выводы
+
+#### 1. Что реализовано:
+- Таблица-журнал аудита с записями о всех операциях изменения данных  
+- Триггеры каскадного удаления для связей "один-ко-многим" (products→inventory/admissions/requests, warehouses→inventory/admissions/requests)  
+- Триггеры аудита для операций INSERT, UPDATE, DELETE  
+- Использование TG_OP для определения типа операции в функциях триггеров  
+
+#### 2. Особенности реализации:
+- BEFORE триггеры используются для каскадного удаления
+- Один триггер на таблицу объединяет каскадное удаление и аудит
+- Переменные NEW и OLD правильно обрабатываются в зависимости от операции
+- Таблица audit_log содержит минимально необходимую информацию об изменениях
+
+#### 3. Доказательство работоспособности:
+- Каждая операция INSERT/UPDATE/DELETE записывается в журнал ровно один раз
+- При удалении записи из главной таблицы автоматически удаляются связанные записи
+- Время и пользователь изменений фиксируются автоматически
+- Все триггеры успешно созданы и активированы в схеме firsov2272
+
+###  Заключение
+- Триггеры каскадного удаления работают корректно
+- Система аудита фиксирует все изменения в БД
+- Созданные объекты проверены и функционируют
+- Доказана работоспособность через серию тестов
